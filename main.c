@@ -1,7 +1,7 @@
 /*
- * main.c — 3pi+ 32U4 Line Maze Solver (learn + rerun) using your drivers
- * Deps: motors.h/.c, line_sensors.h/.c, OLED.h/.c, font.c
- * No EEPROM / No buttons / No buzzer required
+ * main.c — 3pi+ 32U4 Line Maze Solver (learn + rerun on Button B) using your drivers
+ * Deps: motors.h/.c, line_sensors.h/.c, OLED.h/.c, font.c (for getGlyphColumn) optional
+ * No EEPROM / No Arduino core / No buzzer required
  */
 
 #define F_CPU 16000000UL
@@ -15,13 +15,49 @@
 
 #include "motors.h"
 #include "line_sensors.h"
-#include "OLED.h"   // your bit-banged SSD1306-ish driver (with getGlyphColumn)
+#include "OLED.h"   // your SSD1306-ish driver (with getGlyphColumn)
 
+/* -------- Tiny delay wrapper for variable milliseconds -------- */
 static inline void delay_ms_u16(uint16_t ms)
 {
-	while (ms--) { _delay_ms(1); }   // 1 ms is a compile-time constant
+    while (ms--) { _delay_ms(1); }   // 1 ms is a compile-time constant
 }
 
+/* -------- Minimal Button B driver (PD5 / Arduino D5, active-low) -------- */
+#define BTN_B_DDR   DDRD
+#define BTN_B_PORT  PORTD
+#define BTN_B_PINR  PIND
+#define BTN_B_BIT   5
+
+static inline void buttonB_init(void)
+{
+    BTN_B_DDR  &= ~(1 << BTN_B_BIT);   // input
+    BTN_B_PORT |=  (1 << BTN_B_BIT);   // enable internal pull-up
+}
+
+static inline bool buttonB_is_pressed_raw(void)
+{
+    // Active-low: pressed == 0
+    return (BTN_B_PINR & (1 << BTN_B_BIT)) == 0;
+}
+
+/* Simple debounced "press" edge detector (returns true once per clean press).
+   Assumes you poll it roughly every 1 ms (we do, in the wait loop). */
+static bool buttonB_getSingleDebouncedPress(void)
+{
+    static uint8_t  state = 0;  // 0=released,1=maybe-pressed,2=pressed,3=maybe-released
+    static uint16_t timer = 0;
+
+    bool v = buttonB_is_pressed_raw();
+    switch (state)
+    {
+        case 0: if (v) { state = 1; timer = 0; } break;
+        case 1: if (v) { if (++timer >= 15) { state = 2; return true; } } else { state = 0; } break;
+        case 2: if (!v) { state = 3; timer = 0; } break;
+        case 3: if (!v) { if (++timer >= 15) state = 0; } else { state = 2; } break;
+    }
+    return false;
+}
 
 /* ---------------- Parameters (tuned conservatively) ---------------- */
 static uint16_t maxSpeed;
@@ -173,15 +209,15 @@ static void turn(char dir)
     {
         case 'L':
             motors_set_speeds(-(int16_t)turnSpeed, (int16_t)turnSpeed);
-			delay_ms_u16(turnDelay_ms);
+            delay_ms_u16(turnDelay_ms);
             break;
         case 'R':
             motors_set_speeds((int16_t)turnSpeed, -(int16_t)turnSpeed);
-			delay_ms_u16(turnDelay_ms);
+            delay_ms_u16(turnDelay_ms);
             break;
         case 'B':
             motors_set_speeds((int16_t)turnSpeed, -(int16_t)turnSpeed);
-			delay_ms_u16(2*turnDelay_ms);
+            delay_ms_u16((uint16_t)(2*turnDelay_ms));
             break;
         case 'S':
         default:
@@ -203,7 +239,7 @@ static char select_turn(bool left, bool straight, bool right)
 
 /* ---------------- PID line follower for one segment ----------------
    Run until we detect: (a) dead-end ahead, or (b) intersection entry.
-   We *return* at the moment of detection; caller will creep forward,
+   We return at the moment of detection; caller will creep forward,
    probe branches, and decide the turn.
 */
 static int16_t lastError = 0;
@@ -255,7 +291,7 @@ static void follow_segment(void)
     }
 }
 
-/* ---------------- Learning + rerun ---------------- */
+/* ---------------- Learning + rerun (button-gated) ---------------- */
 static void run_maze_solver(void)
 {
     char buf[22];
@@ -272,7 +308,7 @@ static void run_maze_solver(void)
 
         // small creep to stabilize if we entered at an angle
         motors_set_speeds(angintSpeed, angintSpeed);
-		delay_ms_u16(angintDelay_ms);
+        delay_ms_u16(angintDelay_ms);
 
         // Probe for exits
         bool found_left = false, found_right = false, found_straight = false;
@@ -284,7 +320,7 @@ static void run_maze_solver(void)
 
         // move forward a touch to align wheels with intersection, then recheck straight
         motors_set_speeds(interSpeed, interSpeed);
-		delay_ms_u16(interDelay_ms);
+        delay_ms_u16(interDelay_ms);
 
         line_readLineBlack(s, LS_MODE_On);
         if (s[1] > TH_STRAIGHT || s[2] > TH_STRAIGHT || s[3] > TH_STRAIGHT)
@@ -310,31 +346,44 @@ static void run_maze_solver(void)
         oled_write_string_at(1, 0, buf);
     }
 
-    // --- RERUN (minimized path) ---
-    oled_clear_page(0); oled_clear_page(1);
-    oled_write_string_at(0, 0, "Rerun...");
-    oled_write_string_at(1, 0, path);
-
-    for (uint8_t i = 0; i < path_len; i++)
+    // --------- Infinite button-gated re-runs ----------
+    for (;;)
     {
+        // Wait for Button B press to begin the rerun
+        oled_clear_page(0); oled_clear_page(1);
+        oled_write_string_at(0, 0, "Press B to");
+        oled_write_string_at(1, 0, "re-run path");
+
+        for (;;)
+        {
+            if (buttonB_getSingleDebouncedPress()) break;
+            _delay_ms(1);
+        }
+
+        // Rerun the minimized path
+        oled_clear_page(0); oled_clear_page(1);
+        oled_write_string_at(0, 0, "Rerun...");
+        oled_write_string_at(1, 0, path);
+
+        for (uint8_t i = 0; i < path_len; i++)
+        {
+            follow_segment();
+
+            // short braking profile before executing the turn
+            motors_set_speeds(llbrake1Speed, llbrake1Speed); delay_ms_u16(llbrake1Delay_ms);
+            motors_set_speeds(llbrake2Speed, llbrake2Speed); delay_ms_u16(llbrake2Delay_ms);
+
+            turn(path[i]);
+        }
+
+        // Final segment to the finish
         follow_segment();
+        motors_set_speeds(0, 0);
 
-        // short braking profile before executing the turn
-        motors_set_speeds(llbrake1Speed, llbrake1Speed); delay_ms_u16(llbrake1Delay_ms);
-        motors_set_speeds(llbrake2Speed, llbrake2Speed); delay_ms_u16(llbrake2Delay_ms);
-
-        turn(path[i]);
+        oled_clear_page(0); oled_clear_page(1);
+        oled_write_string_at(0, 0, "Done! Press");
+        oled_write_string_at(1, 0, "B to rerun");
     }
-
-    // Final segment to the finish
-    follow_segment();
-    motors_set_speeds(0, 0);
-
-    oled_clear_page(0); oled_clear_page(1);
-    oled_write_string_at(0, 0, "Done!");
-    oled_write_string_at(1, 0, path);
-
-    // If you want infinite reruns, wrap the rerun block in a while(1) loop.
 }
 
 /* ---------------- Main ---------------- */
@@ -343,6 +392,7 @@ int main(void)
     // Init subsystems
     line_sensors_init();        // Timer3 + emitter control
     motors_init(400);           // Timer1 20 kHz (ICR1=400), speeds +/-400
+    buttonB_init();             // Button B (PD5)
     selectStandard();
     oled_begin();
 
@@ -359,14 +409,14 @@ int main(void)
         else
             motors_set_speeds((int16_t)calibrationSpeed, -(int16_t)calibrationSpeed);
 
-        line_calibrate(LS_MODE_On);   // does 10 reads per call (Pololu/your semantics)
+        line_calibrate(LS_MODE_On);   // does 10 reads per call (per your driver)
         _delay_ms(10);
     }
     motors_set_speeds(0, 0);
 
-    // Kick off the maze solver (learn + rerun)
+    // Kick off the maze solver (learn once, then rerun on Button B forever)
     run_maze_solver();
 
-    // Stop forever (or loop reruns in run_maze_solver if you prefer)
+    // Not reached
     while (1) { }
 }
