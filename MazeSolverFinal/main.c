@@ -4,7 +4,7 @@
  * 3pi+ 32U4 Line Maze Solver
  *  - First pass: explore and learn the maze
  *  - Simplify the path
- *  - Later passes: replay the simplified path when Button B is pressed
+ *  - Replay the simplified path
  *
  * Author: Camille Gowda
  * Uses:
@@ -27,7 +27,7 @@
 #include "OLED.h"
 
 
-static uint8_t lastSegmentEndedAtGoal = 0;
+
 
 /* ---------- Simple time helper ---------- */
 static inline void wait_ms(uint16_t ms)
@@ -38,61 +38,6 @@ static inline void wait_ms(uint16_t ms)
     }
 }
 
-/* ---------- Button B (PD5, active-low) ---------- */
-#define BTN_B_DDR   DDRD
-#define BTN_B_PORT  PORTD
-#define BTN_B_PIN   PIND
-#define BTN_B_BIT   5
-
-static void buttonB_setup(void)
-{
-    BTN_B_DDR  &= ~(1 << BTN_B_BIT);   // input
-    BTN_B_PORT |=  (1 << BTN_B_BIT);   // pull-up on
-}
-
-static bool buttonB_raw(void)
-{
-    return (BTN_B_PIN & (1 << BTN_B_BIT)) == 0;  // active-low
-}
-
-// Very small debouncer: returns true once per clean press
-static bool buttonB_pressed(void)
-{
-    static uint8_t state = 0;
-    static uint8_t cnt   = 0;
-    bool v = buttonB_raw();
-
-    switch (state)
-    {
-        case 0: // idle, waiting for press
-            if (v) { state = 1; cnt = 0; }
-            break;
-        case 1: // confirm press
-            if (v)
-            {
-                if (++cnt >= 15) { state = 2; return true; }
-            }
-            else
-            {
-                state = 0;
-            }
-            break;
-        case 2: // pressed; wait for release
-            if (!v) { state = 3; cnt = 0; }
-            break;
-        case 3: // confirm release
-            if (!v)
-            {
-                if (++cnt >= 15) state = 0;
-            }
-            else
-            {
-                state = 2;
-            }
-            break;
-    }
-    return false;
-}
 
 /* ---------- Controller & robot parameters ---------- */
 
@@ -351,13 +296,6 @@ static void follow_segment_until_break(void)
         r = clamp16(r, cfg.minSpeed, (int16_t)cfg.maxSpeed);
         motors_set_speeds(l, r);
 		
-		
-		// --- NEW: direct goal detection while we are still over the blob ---
-		bool goal_now =
-		(sense[1] > TH_GOAL &&
-		sense[2] > TH_GOAL &&
-		sense[3] > TH_GOAL);
-
 
 
         // Condition A: no line ahead (approaching node / gap / dead end)
@@ -387,6 +325,7 @@ static bool handle_node_learn(void)
     char status[24];
     uint16_t s[NUM_SENSORS];
 
+
     follow_segment_until_break();
 
 
@@ -398,16 +337,18 @@ static bool handle_node_learn(void)
     bool has_right = false;
     bool has_straight = false;
 
-    // First peek: check sides
+    // Read sensors and check sides
     line_readLineBlack(s, LS_MODE_On);
     if (s[0] > TH_SIDE_LINE) has_left  = true;
     if (s[4] > TH_SIDE_LINE) has_right = true;
 
-    // Move further into intersection to decide straight / goal
+    // Inch into intersection to decide straight / goal
     motors_set_speeds(cfg.centerSpeed, cfg.centerSpeed);
     wait_ms(cfg.centerTime_ms);
 
     line_readLineBlack(s, LS_MODE_On);
+	
+	// Decide if straight available
     if (s[1] > TH_STRAIGHT_OK || s[2] > TH_STRAIGHT_OK || s[3] > TH_STRAIGHT_OK)
         has_straight = true;
 
@@ -438,22 +379,26 @@ static bool handle_node_learn(void)
     oled_putStringAt(1, 0, status);
 
 
+
+
+
     // Goal check: Hard coded version simply counting turns
-    if (pathLen>26)
-    {
-	    motors_set_speeds(0, 0);
-	    oled_clearPage(0);
-	    oled_clearPage(1);
-	    oled_putStringAt(0, 0, "Goal Reached");
-	    _delay_ms(4000);
-	    return true;
-    }
+    
+	//if (pathLen>26)
+    //{
+	//    motors_set_speeds(0, 0);
+	//    oled_clearPage(0);
+	//    oled_clearPage(1);
+	//    oled_putStringAt(0, 0, "Goal Reached");
+	//    _delay_ms(4000);
+	//    return true;
+    //}
 
 
     return false;
 }
 
-/* ---------- Learning and replay phases ---------- */
+// Learn maze by following left hand rule and simplifying path until goal is reached
 
 static void learn_maze(void)
 {
@@ -464,7 +409,7 @@ static void learn_maze(void)
 
     while (!handle_node_learn())
     {
-        // keep exploring until goal is found
+        // Keep exploring until goal is found (true gets returned)
     }
 }
 
@@ -476,7 +421,7 @@ static void rerun_maze(void)
 	// Reset robot
 	oled_clearPage(0);
 	oled_clearPage(1);
-	oled_putStringAt(0, 0, "Reset to start");
+	oled_putStringAt(0, 0, "Reset to start...");
 	oled_putStringAt(1, 0, path);
 
 	_delay_ms(7000);
@@ -491,7 +436,7 @@ static void rerun_maze(void)
         {
             follow_segment_until_break();
 
-            // soft braking before turning
+            // Soft braking before turning
             motors_set_speeds(cfg.brake1Speed, cfg.brake1Speed);
             wait_ms(cfg.brake1Time_ms);
             motors_set_speeds(cfg.brake2Speed, cfg.brake2Speed);
@@ -500,7 +445,7 @@ static void rerun_maze(void)
             rotate_robot(path[i]);
         }
 
-        // final segment into goal
+        // Final segment into goal
         follow_segment_until_break();
         motors_set_speeds(0, 0);
 
@@ -515,16 +460,14 @@ static void rerun_maze(void)
 
 int main(void)
 {
-    // hardware init
+    // Initialize hardware, motors, OLED, etc.
     line_sensors_init();
     motors_init(400);       // Timer1, TOP=400
-    buttonB_setup();
     load_default_config();
     oled_startup();
-
     _delay_ms(300);
 
-    // calibration (spin in place, emitters on)
+    // Calibrate line sensors
     line_calibrate_reset();
     for (uint16_t i = 0; i < 80; i++)
     {
@@ -542,10 +485,14 @@ int main(void)
         line_calibrate(LS_MODE_On);
         _delay_ms(10);
     }
+	
+	// End of calibration
     motors_set_speeds(0, 0);
 
-    // learn once, then rerun forever
+    // Learn the maze and store the simplified path
     learn_maze();
+	
+	// Place robot back at beginning and rerun
     rerun_maze();
 
     while (1) { }
