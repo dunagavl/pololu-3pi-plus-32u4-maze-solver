@@ -1,16 +1,12 @@
 /*
  * MazeSolver.c
  *
- * 3pi+ 32U4 Line Maze Solver
+ * Line Maze Solver
  *  - First pass: explore and learn the maze
  *  - Simplify the path
  *  - Replay the simplified path
  *
  * Author: Camille Gowda
- * Uses:
- *  - motors.h        (motors_init, motors_set_speeds)
- *  - line_sensors.h  (line_sensors_init, line_calibrate, line_readLineBlack, etc.)
- *  - OLED.h          (SSD1306-style API with getGlyphColumn)
  */
 
 #define F_CPU 16000000UL
@@ -29,7 +25,7 @@
 
 
 
-/* ---------- Simple time helper ---------- */
+// Time helper for larger ms delays
 static inline void wait_ms(uint16_t ms)
 {
     while (ms--)
@@ -39,7 +35,7 @@ static inline void wait_ms(uint16_t ms)
 }
 
 
-/* ---------- Controller & robot parameters ---------- */
+// Data structure for simpler configuration of robot parameters
 
 typedef struct
 {
@@ -71,6 +67,8 @@ typedef struct
 
 static RobotConfig cfg;
 
+
+// Initializes robot motor configuration parameters
 static void load_default_config(void)
 {
     cfg.maxSpeed       = 80;
@@ -78,9 +76,10 @@ static void load_default_config(void)
     cfg.cruiseSpeed    = 80;
     cfg.calibSpeed     = 60;
 
-    cfg.Kp             = 16;    // ~1/4
-    cfg.Kd             = 64;   // ~1
-    cfg.Ki             = 0;    // small I
+	// PID tuning control
+    cfg.Kp             = 16; 
+    cfg.Kd             = 64;  
+    cfg.Ki             = 0;    
 
     cfg.creepSpeed     = 61;
     cfg.creepTime_ms   = 38;
@@ -97,12 +96,14 @@ static void load_default_config(void)
     cfg.brake2Time_ms  = 55;
 }
 
-/* ---------- PID state ---------- */
+//PID state control
 
 static int32_t i_sum = 0;
 static const int16_t I_LIM = 150;
 static int16_t lastError = 0;
 
+
+// Helper method for cutting off a 16 bit int at a given min and max
 static inline int16_t clamp16(int16_t val, int16_t min, int16_t max)
 {
     if (val < min) return min;
@@ -110,7 +111,7 @@ static inline int16_t clamp16(int16_t val, int16_t min, int16_t max)
     return val;
 }
 
-/* ---------- OLED helpers ---------- */
+//OLED helper methods for better printing
 
 static void oled_setCursor(uint8_t page, uint8_t col)
 {
@@ -158,18 +159,20 @@ static void oled_startup(void)
     oled_putStringAt(1, 0, "Calibrating");
 }
 
-/* ---------- Path recording and simplification ---------- */
+// Path recording array initialization
 
-#define PATH_MAX 64
+#define PATH_MAX 32
 static char   path[PATH_MAX];
 static uint8_t pathLen = 0;
 
+// Resets path
 static void path_clear(void)
 {
     pathLen = 0;
     path[0] = 0;
 }
 
+// Adds a turn to the path when given 'L', 'S', 'B', or 'R'
 static void path_add(char step)
 {
     if (pathLen < PATH_MAX - 1)
@@ -179,7 +182,7 @@ static void path_add(char step)
     }
 }
 
-/* Replace the pattern X ? U ? Y with a single equivalent turn. */
+// Replace the pattern 'x''U''x' with equivalent turn
 static void path_simplify(void)
 {
     if (pathLen < 3) return;
@@ -201,15 +204,15 @@ static void path_simplify(void)
         case 90:  path[pathLen - 3] = 'R'; break;
         case 180: path[pathLen - 3] = 'U'; break;
         case 270: path[pathLen - 3] = 'L'; break;
-        default:  /* should not happen */    break;
+        default:  /* Never reached */    break;
     }
 
     pathLen -= 2;
     path[pathLen] = 0;
 }
 
-/* ---------- Turning helpers ---------- */
 
+// Turns given a char from the path array
 static void rotate_robot(char code)
 {
     switch (code)
@@ -237,6 +240,7 @@ static void rotate_robot(char code)
     _delay_ms(20);
 }
 
+// Selects turn based on Left Hand on Wall priorities
 static char choose_turn(bool left_ok, bool straight_ok, bool right_ok)
 {
     // Left-hand rule
@@ -246,21 +250,17 @@ static char choose_turn(bool left_ok, bool straight_ok, bool right_ok)
     return 'U'; // dead end: U-turn
 }
 
-/* ---------- Thresholds for interpreting sensor states ---------- */
-
+// Thresholds for sensing maze feathers
 enum
 {
-    TH_NO_LINE     = 100,   // “nothing ahead” if inner sensors < this
+    TH_NO_LINE     = 100,   // nothing ahead if inner sensors < this
     TH_SIDE_LINE   = 200,   // side branch present if side > this
     TH_STRAIGHT_OK = 300,   // forward line present if any mid > this
-    TH_GOAL        = 300    // “finish blob” if all mid sensors > this
+    TH_GOAL        = 300    // finish if all mid sensors > this
 };
 
-/* ---------- Line follower for a single segment ---------- */
-/* Runs until:
- *  - straight line disappears, or
- *  - side branch is detected.
- */
+//  Line follower for a single segment - 
+// Runs until nothing ahead or a side branch is detected
 static void follow_segment_until_break(void)
 {
     uint16_t sense[NUM_SENSORS];
@@ -286,7 +286,7 @@ static void follow_segment_until_break(void)
 
         int16_t I = (int16_t)I32;
 
-        int16_t diff = P + D + I;
+        int16_t diff = P + I + D;
         lastError = e;
 
         int16_t l = (int16_t)cfg.cruiseSpeed + diff;
@@ -298,28 +298,28 @@ static void follow_segment_until_break(void)
 		
 
 
-        // Condition A: no line ahead (approaching node / gap / dead end)
+        // No line ahead (approaching node / gap / dead end)
         bool center_empty = (sense[1] < TH_NO_LINE &&
                              sense[2] < TH_NO_LINE &&
                              sense[3] < TH_NO_LINE);
         if (center_empty) return;
 
-        // Condition B: either side sees a branch
+        // Branch detected
         if (sense[0] > TH_SIDE_LINE || sense[4] > TH_SIDE_LINE) return;
 
         _delay_ms(2);
     }
 }
 
-/* ---------- Single intersection handling (learn phase) ---------- */
-/* 1. follow_segment_until_break()
- * 2. small creep forward
- * 3. read sensors to detect L/R branches
- * 4. move further into intersection to check straight
- * 5. detect goal or choose turn (left-hand rule)
- * 6. rotate and record path + simplify
- * Returns true if goal was reached.
- */
+// Single intersection handling (learn phase)
+// 1. follow_segment_until_break()
+// 2. small creep forward
+// 3. read sensors to detect L/R branches
+// 4. move further into intersection to check straight
+// 5. detect goal or choose turn (left-hand rule)
+// 6. rotate and record path + simplify
+// Returns true when goal is reached.
+
 static bool handle_node_learn(void)
 {
     char status[24];
@@ -421,7 +421,7 @@ static void rerun_maze(void)
 	// Reset robot
 	oled_clearPage(0);
 	oled_clearPage(1);
-	oled_putStringAt(0, 0, "Reset to start...");
+	oled_putStringAt(0, 0, "Reset to start");
 	oled_putStringAt(1, 0, path);
 
 	_delay_ms(7000);
@@ -453,11 +453,12 @@ static void rerun_maze(void)
         oled_clearPage(1);
         snprintf(msg, sizeof(msg), "Done!");
         oled_putStringAt(0, 0, msg);
-    }
-//}
+}
 
-/* ---------- Main ---------- */
 
+
+
+// Main progran control, runs initalization, solve and rerun
 int main(void)
 {
     // Initialize hardware, motors, OLED, etc.
